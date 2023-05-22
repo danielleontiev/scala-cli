@@ -22,6 +22,8 @@ import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 import scala.util.{Failure, Properties, Success, Try}
 
+import scala.build.bsp as sb
+
 abstract class BspTestDefinitions(val scalaVersionOpt: Option[String])
     extends ScalaCliSuite with TestScalaVersionArgs {
 
@@ -83,7 +85,26 @@ abstract class BspTestDefinitions(val scalaVersionOpt: Option[String])
     f: (
       os.Path,
       TestBspClient,
-      b.BuildServer & b.ScalaBuildServer & b.JavaBuildServer
+      sb.ExtendedBuildServer & b.ScalaBuildServer & b.JavaBuildServer & sb.CustomBspExtensions
+    ) => Future[T]
+  ): T =
+    withBspDetailed(inputs, args, attempts, pauseDuration, bspOptions, reuseRoot)(
+      (root, localClient, _, remoteServer) => f(root, localClient, remoteServer)
+    )
+
+  def withBspDetailed[T](
+    inputs: TestInputs,
+    args: Seq[String],
+    attempts: Int = if (TestUtil.isCI) 3 else 1,
+    pauseDuration: FiniteDuration = 5.seconds,
+    bspOptions: List[String] = List.empty,
+    reuseRoot: Option[os.Path] = None
+  )(
+    f: (
+      os.Path,
+      TestBspClient,
+      sb.ExtendedInitializeBuildResult,
+      sb.ExtendedBuildServer & b.ScalaBuildServer & b.JavaBuildServer & sb.CustomBspExtensions
     ) => Future[T]
   ): T = {
 
@@ -92,7 +113,9 @@ abstract class BspTestDefinitions(val scalaVersionOpt: Option[String])
 
       val proc = os.proc(TestUtil.cli, "bsp", bspOptions ++ extraOptions, args)
         .spawn(cwd = root)
-      var remoteServer: b.BuildServer & b.ScalaBuildServer & b.JavaBuildServer = null
+      var remoteServer
+        : sb.ExtendedBuildServer & b.ScalaBuildServer & b.JavaBuildServer & sb.CustomBspExtensions =
+        null
 
       val bspServerExited = Promise[Unit]()
       val t = new Thread("bsp-server-watcher") {
@@ -118,11 +141,14 @@ abstract class BspTestDefinitions(val scalaVersionOpt: Option[String])
         val (localClient, remoteServer0, _) =
           TestBspClient.connect(proc.stdout, proc.stdin, pool)
         remoteServer = remoteServer0
-        Await.result(
+        val initializeResult = Await.result(
           whileBspServerIsRunning(remoteServer.buildInitialize(initParams(root)).asScala),
           Duration.Inf
         )
-        Await.result(whileBspServerIsRunning(f(root, localClient, remoteServer)), Duration.Inf)
+        Await.result(
+          whileBspServerIsRunning(f(root, localClient, initializeResult, remoteServer)),
+          Duration.Inf
+        )
       }
       finally {
         if (remoteServer != null)
@@ -1472,6 +1498,47 @@ abstract class BspTestDefinitions(val scalaVersionOpt: Option[String])
                      |//> using test.sourceJar Message-sources.jar""".stripMargin,
       checkTestTarget = true
     )
+  }
+
+  test("build server capabilities should include formatProvider for Scala") {
+    val inputs = TestInputs(
+      os.rel / "simple.sc" ->
+        s"""val msg = "Hello"
+           |println(msg)
+           |""".stripMargin
+    )
+
+    withBspDetailed(inputs, Seq(".")) { (_, _, initResult, _) =>
+      async {
+        expect(initResult.getCapabilities.getFormatProvider.getLanguageIds.asScala == List("scala"))
+      }
+    }
+  }
+
+  test("textDocument/format should invoke formatting with correct parameters") {
+    val inputs = TestInputs(
+      os.rel / "simple.sc" ->
+        s"""val msg = "Hello"
+           |println(msg)
+           |""".stripMargin
+    )
+
+    withBsp(inputs, Seq(".")) { (_, localClient, remoteServer) =>
+      async {
+        await(remoteServer.workspaceBuildTargets().asScala)
+
+        val formatRequest = new sb.FormatParams(List("file:///simple.sc").asJava)
+
+        await(remoteServer.textDocumentFormat(formatRequest).asScala)
+        val diagnostics = localClient.latestDiagnostics().getOrElse(
+          throw new RuntimeException("non empty diagnostics expected")
+        )
+
+        val message = diagnostics.getDiagnostics().asScala.head.getMessage()
+
+        expect(message == "[file:///simple.sc]")
+      }
+    }
   }
 
   private def checkIfBloopProjectIsInitialised(

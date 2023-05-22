@@ -5,11 +5,11 @@ import ch.epfl.scala.{bsp4j => b}
 
 import java.util.concurrent.CompletableFuture
 
-trait LoggingBuildServer extends b.BuildServer {
-  protected def underlying: b.BuildServer
+trait LoggingBuildServer extends ExtendedBuildServer {
+  protected def underlying: ExtendedBuildServer
   override def buildInitialize(
     params: b.InitializeBuildParams
-  ): CompletableFuture[b.InitializeBuildResult] =
+  ): CompletableFuture[ExtendedInitializeBuildResult] =
     underlying.buildInitialize(pprint.err.log(params)).logF
   override def onBuildExit(): Unit =
     underlying.onBuildExit()

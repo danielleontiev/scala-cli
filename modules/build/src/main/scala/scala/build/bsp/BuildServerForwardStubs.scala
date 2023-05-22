@@ -6,10 +6,10 @@ import ch.epfl.scala.{bsp4j => b}
 import java.util.concurrent.CompletableFuture
 import java.util.function.BiFunction
 
-trait BuildServerForwardStubs extends b.BuildServer {
-  protected def forwardTo: b.BuildServer
-
-  protected def onFatalError(throwable: Throwable, context: String): Unit
+class BuildServerForwardStubs(
+  forwardTo: b.BuildServer,
+  onFatalError: (throwable: Throwable, context: String) => Unit
+) extends b.BuildServer {
 
   def fatalExceptionHandler[T](methodName: String, params: Any*) = new BiFunction[T, Throwable, T] {
     override def apply(maybeValue: T, maybeException: Throwable): T =
@@ -79,6 +79,11 @@ trait BuildServerForwardStubs extends b.BuildServer {
     forwardTo.workspaceBuildTargets()
       .handle(fatalExceptionHandler("workspaceBuildTargets"))
 
+  override def buildTargetDependencyModules(params: DependencyModulesParams)
+    : CompletableFuture[DependencyModulesResult] =
+    forwardTo.buildTargetDependencyModules(params)
+      .handle(fatalExceptionHandler("buildTargetDependencyModules", params))
+
   /** This implementation should never be called and is merely a placeholder. As Bloop doesn't
     * support reloading its workspace, Scala CLI has to reload Bloop instead. And so,
     * [[BuildServerProxy]].workspaceReload() is responsible for the actual reload.
@@ -86,8 +91,18 @@ trait BuildServerForwardStubs extends b.BuildServer {
   override def workspaceReload(): CompletableFuture[Object] =
     CompletableFuture.completedFuture(new Object) // should never be called, as per scaladoc
 
-  override def buildTargetDependencyModules(params: DependencyModulesParams)
-    : CompletableFuture[DependencyModulesResult] =
-    forwardTo.buildTargetDependencyModules(params)
-      .handle(fatalExceptionHandler("buildTargetDependencyModules", params))
+  override def buildTargetOutputPaths(params: b.OutputPathsParams)
+    : CompletableFuture[b.OutputPathsResult] =
+    throw new IllegalStateException("should never be invoked")
+
+  override def onBuildInitialized(): Unit =
+    throw new IllegalStateException("should never be invoked")
+
+  override def buildInitialize(params: b.InitializeBuildParams)
+    : CompletableFuture[b.InitializeBuildResult] =
+    throw new IllegalStateException("should never be invoked")
+
+  override def onBuildExit(): Unit =
+    throw new IllegalStateException("should never be invoked")
+
 }

@@ -857,6 +857,8 @@ trait CliIntegration extends SbtModule with ScalaCliPublishModule with HasTests
     Deps.osLib
   )
 
+  def moduleDeps = Seq(`scala-cli-bsp`)
+
   private def mainArtifactName = T(artifactName())
   trait Tests extends super.Tests with ScalaCliScalafixModule {
     def ivyDeps = super.ivyDeps() ++ Agg(

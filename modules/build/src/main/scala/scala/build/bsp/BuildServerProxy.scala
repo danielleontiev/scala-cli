@@ -17,10 +17,15 @@ import scala.build.options.Scope
 class BuildServerProxy(
   bspServer: () => BspServer,
   onReload: () => CompletableFuture[Object]
-) extends b.BuildServer with b.ScalaBuildServer with b.JavaBuildServer with b.JvmBuildServer
-    with ScalaScriptBuildServer with HasGeneratedSources {
+) extends ExtendedBuildServer
+    with b.ScalaBuildServer
+    with b.JavaBuildServer
+    with b.JvmBuildServer
+    with ScalaScriptBuildServer
+    with CustomBspExtensions
+    with HasGeneratedSources {
   override def buildInitialize(params: b.InitializeBuildParams)
-    : CompletableFuture[b.InitializeBuildResult] = bspServer().buildInitialize(params)
+    : CompletableFuture[ExtendedInitializeBuildResult] = bspServer().buildInitialize(params)
 
   override def onBuildInitialized(): Unit = bspServer().onBuildInitialized()
 
@@ -83,6 +88,24 @@ class BuildServerProxy(
   override def buildTargetOutputPaths(params: b.OutputPathsParams)
     : CompletableFuture[b.OutputPathsResult] =
     bspServer().buildTargetOutputPaths(params)
+
+  override def textDocumentFormat(params: FormatParams): CompletableFuture[AnyRef] = {
+    import scala.jdk.CollectionConverters._
+    // dummy implementation that publishes diagnostics with received
+    // call parameters
+    val client = bspServer().clientOpt.getOrElse(throw new RuntimeException("cannot access client"))
+    val dummyTarget = new b.BuildTargetIdentifier("foobar")
+    val dummyPos    = new b.Position(0, 0)
+    val dummyRange  = new b.Range(dummyPos, dummyPos)
+    val diagnostics = new b.PublishDiagnosticsParams(
+      new b.TextDocumentIdentifier("file:///dummy.sc"),
+      dummyTarget,
+      List(new b.Diagnostic(dummyRange, params.getUris.asScala.mkString("[", ",", "]"))).asJava,
+      false
+    )
+    client.onBuildPublishDiagnostics(diagnostics)
+    CompletableFuture.completedFuture(new Object)
+  }
 
   /** As Bloop doesn't support `workspace/reload` requests and we have to reload it on Scala CLI's
     * end, this is used instead of [[BspServer]]'s [[BspServerForwardStubs]].workspaceReload().
