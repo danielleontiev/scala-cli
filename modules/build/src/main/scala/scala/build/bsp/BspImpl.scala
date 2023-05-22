@@ -467,14 +467,14 @@ final class BspImpl(
     bloopSession.update(null, currentBloopSession, "BSP server already initialized")
 
     val actualLocalServer
-      : b.BuildServer with b.ScalaBuildServer with b.JavaBuildServer with b.JvmBuildServer
+      : ExtendedBuildServer with b.ScalaBuildServer with b.JavaBuildServer with b.JvmBuildServer
         with ScalaScriptBuildServer with HasGeneratedSources =
       new BuildServerProxy(
         () => bloopSession.get().bspServer,
         () => onReload()
       )
 
-    val localServer: b.BuildServer with b.ScalaBuildServer with b.JavaBuildServer
+    val localServer: ExtendedBuildServer with b.ScalaBuildServer with b.JavaBuildServer
       with b.JvmBuildServer with ScalaScriptBuildServer =
       if (verbosity >= 3)
         new LoggingBuildServerAll(actualLocalServer)

@@ -20,11 +20,11 @@ class BspServer(
   compile: (() => CompletableFuture[b.CompileResult]) => CompletableFuture[b.CompileResult],
   logger: Logger,
   presetIntelliJ: Boolean = false
-) extends b.BuildServer with b.ScalaBuildServer with b.JavaBuildServer with BuildServerForwardStubs
+) extends ExtendedBuildServer
+    with b.ScalaBuildServer
+    with b.JavaBuildServer
+    with b.JvmBuildServer
     with ScalaScriptBuildServer
-    with ScalaBuildServerForwardStubs
-    with JavaBuildServerForwardStubs
-    with JvmBuildServerForwardStubs
     with HasGeneratedSourcesImpl {
 
   private var client: Option[BuildClient] = None
@@ -47,7 +47,7 @@ class BspServer(
   }
 
   // Can we accept some errors in some circumstances?
-  override protected def onFatalError(throwable: Throwable, context: String): Unit = {
+  private def onFatalError(throwable: Throwable, context: String): Unit = {
     val sw = new StringWriter()
     throwable.printStackTrace(new PrintWriter(sw))
     val message =
@@ -139,8 +139,7 @@ class BspServer(
     }
   }
 
-  protected def forwardTo
-    : b.BuildServer & b.ScalaBuildServer & b.JavaBuildServer & b.JvmBuildServer = bloopServer
+  private val buildServerForward = new BuildServerForwardStubs(bloopServer, onFatalError)
 
   private val supportedLanguages: ju.List[String] = List(
     "scala",
@@ -149,12 +148,17 @@ class BspServer(
     "scala-sc"
   ).asJava
 
-  private def capabilities: b.BuildServerCapabilities = {
-    val capabilities = new b.BuildServerCapabilities
+  private val formatSupportedLanguages: ju.List[String] = List(
+    "scala"
+  ).asJava
+
+  private def capabilities: ExtendedBuildServerCapabilities = {
+    val capabilities = new ExtendedBuildServerCapabilities
     capabilities.setCompileProvider(new b.CompileProvider(supportedLanguages))
     capabilities.setTestProvider(new b.TestProvider(supportedLanguages))
     capabilities.setRunProvider(new b.RunProvider(supportedLanguages))
     capabilities.setDebugProvider(new b.DebugProvider(supportedLanguages))
+    capabilities.setFormatProvider(new FormatProvider(formatSupportedLanguages))
     capabilities.setInverseSourcesProvider(true)
     capabilities.setDependencySourcesProvider(true)
     capabilities.setResourcesProvider(true)
@@ -168,8 +172,8 @@ class BspServer(
 
   override def buildInitialize(
     params: b.InitializeBuildParams
-  ): CompletableFuture[b.InitializeBuildResult] = {
-    val res = new b.InitializeBuildResult(
+  ): CompletableFuture[ExtendedInitializeBuildResult] = {
+    val res = new ExtendedInitializeBuildResult(
       "scala-cli",
       Constants.version,
       bloop.rifle.internal.Constants.bspVersion,
@@ -186,15 +190,15 @@ class BspServer(
   override def buildTargetCleanCache(
     params: b.CleanCacheParams
   ): CompletableFuture[b.CleanCacheResult] =
-    super.buildTargetCleanCache(check(params))
+    buildServerForward.buildTargetCleanCache(check(params))
 
   override def buildTargetCompile(params: b.CompileParams): CompletableFuture[b.CompileResult] =
-    compile(() => super.buildTargetCompile(check(params)))
+    compile(() => buildServerForward.buildTargetCompile(check(params)))
 
   override def buildTargetDependencySources(
     params: b.DependencySourcesParams
   ): CompletableFuture[b.DependencySourcesResult] =
-    super.buildTargetDependencySources(check(params)).thenApply { res =>
+    buildServerForward.buildTargetDependencySources(check(params)).thenApply { res =>
       val updatedItems = res.getItems.asScala.map {
         case item if validTarget(item.getTarget) =>
           val isTestTarget = item.getTarget.getUri.endsWith("-test")
@@ -215,7 +219,7 @@ class BspServer(
   override def buildTargetResources(
     params: b.ResourcesParams
   ): CompletableFuture[b.ResourcesResult] =
-    super.buildTargetResources(check(params))
+    buildServerForward.buildTargetResources(check(params))
 
   override def buildTargetRun(params: b.RunParams): CompletableFuture[b.RunResult] = {
     val target = params.getTarget
@@ -223,22 +227,22 @@ class BspServer(
       logger.debug(
         s"Got invalid target in Run request: ${target.getUri} (expected ${targetScopeIdOpt(Scope.Main).orNull})"
       )
-    super.buildTargetRun(params)
+    buildServerForward.buildTargetRun(params)
   }
 
   override def buildTargetSources(params: b.SourcesParams): CompletableFuture[b.SourcesResult] =
-    super.buildTargetSources(check(params)).thenApply { res =>
+    buildServerForward.buildTargetSources(check(params)).thenApply { res =>
       val res0 = res.duplicate()
       mapGeneratedSources(res0)
       res0
     }
 
   override def buildTargetTest(params: b.TestParams): CompletableFuture[b.TestResult] =
-    super.buildTargetTest(check(params))
+    buildServerForward.buildTargetTest(check(params))
 
   override def debugSessionStart(params: b.DebugSessionParams)
     : CompletableFuture[b.DebugSessionAddress] =
-    super.debugSessionStart(check(params))
+    buildServerForward.debugSessionStart(check(params))
 
   override def buildTargetOutputPaths(params: b.OutputPathsParams)
     : CompletableFuture[b.OutputPathsResult] = {
@@ -259,14 +263,17 @@ class BspServer(
     CompletableFuture.completedFuture(new b.OutputPathsResult(outputPathsItem.asJava))
   }
 
-  override def workspaceBuildTargets(): CompletableFuture[b.WorkspaceBuildTargetsResult] =
-    super.workspaceBuildTargets().thenApply { res =>
+  override def workspaceBuildTargets(): CompletableFuture[ExtendedWorkspaceBuildTargetsResult] =
+    buildServerForward.workspaceBuildTargets().thenApply { res =>
       maybeUpdateProjectTargetUri(res)
       val res0 = res.duplicate()
       stripInvalidTargets(res0)
-      for (target <- res0.getTargets.asScala) {
+      val extendedResults = workspaceBuildTargetsResultToExtended(res0)
+      for (target <- extendedResults.getTargets.asScala) {
         val capabilities = target.getCapabilities
         capabilities.setCanDebug(true)
+        // we have only two targets (main, test), always return true here?
+        capabilities.setCanFormat(true)
         val baseDirectory = new File(new URI(target.getBaseDirectory))
         if (
           isIntelliJ && baseDirectory.getName == Constants.workspaceDirName && baseDirectory.getParentFile != null
@@ -275,7 +282,7 @@ class BspServer(
           target.setBaseDirectory(newBaseDirectory)
         }
       }
-      res0
+      extendedResults
     }
 
   def buildTargetWrappedSources(params: WrappedSourcesParams)
@@ -309,6 +316,72 @@ class BspServer(
 
   override def onBuildExit(): Unit = ()
 
+  // java build server
+  override def buildTargetJavacOptions(params: b.JavacOptionsParams)
+    : ju.concurrent.CompletableFuture[b.JavacOptionsResult] =
+    bloopServer.buildTargetJavacOptions(params)
+
+  // scala build server
+  override def buildTargetScalaTestClasses(params: b.ScalaTestClassesParams)
+    : ju.concurrent.CompletableFuture[b.ScalaTestClassesResult] =
+    bloopServer.buildTargetScalaTestClasses(params)
+
+  override def buildTargetScalaMainClasses(params: b.ScalaMainClassesParams)
+    : ju.concurrent.CompletableFuture[b.ScalaMainClassesResult] =
+    bloopServer.buildTargetScalaMainClasses(params)
+
+  override def buildTargetScalacOptions(params: b.ScalacOptionsParams)
+    : ju.concurrent.CompletableFuture[b.ScalacOptionsResult] =
+    bloopServer.buildTargetScalacOptions(params)
+
+  // jvm build server
+  override def jvmRunEnvironment(params: b.JvmRunEnvironmentParams)
+    : ju.concurrent.CompletableFuture[b.JvmRunEnvironmentResult] =
+    bloopServer.jvmRunEnvironment(params)
+
+  override def jvmTestEnvironment(params: b.JvmTestEnvironmentParams)
+    : ju.concurrent.CompletableFuture[b.JvmTestEnvironmentResult] =
+    bloopServer.jvmTestEnvironment(params)
+
+  // general build server
+  override def buildTargetInverseSources(params: b.InverseSourcesParams)
+    : ju.concurrent.CompletableFuture[b.InverseSourcesResult] =
+    buildServerForward.buildTargetInverseSources(params)
+
+  override def workspaceReload(): ju.concurrent.CompletableFuture[Object] =
+    throw new IllegalStateException("should never be invoked")
+
+  override def buildTargetDependencyModules(params: b.DependencyModulesParams)
+    : ju.concurrent.CompletableFuture[b.DependencyModulesResult] =
+    buildServerForward.buildTargetDependencyModules(params)
+
   def initiateShutdown: Future[Unit] =
     shutdownPromise.future
+
+  private def workspaceBuildTargetsResultToExtended(
+    workspaceBuildTargetsResult: b.WorkspaceBuildTargetsResult
+  ): ExtendedWorkspaceBuildTargetsResult = {
+    val extendedTargets = workspaceBuildTargetsResult.getTargets().asScala.map { target =>
+      val capabilities         = target.getCapabilities()
+      val extendedCapabilities = new ExtendedBuildTargetCapabilities
+      extendedCapabilities.setCanCompile(capabilities.getCanCompile)
+      extendedCapabilities.setCanDebug(capabilities.getCanDebug)
+      extendedCapabilities.setCanRun(capabilities.getCanRun)
+      extendedCapabilities.setCanTest(capabilities.getCanTest)
+      val extendedTarget = new ExtendedBuildTarget(
+        target.getId(),
+        target.getTags(),
+        target.getLanguageIds(),
+        target.getDependencies(),
+        extendedCapabilities
+      )
+      extendedTarget.setDisplayName(target.getDisplayName)
+      extendedTarget.setBaseDirectory(target.getBaseDirectory)
+      extendedTarget.setDataKind(target.getDataKind)
+      extendedTarget.setData(target.getData)
+      extendedTarget
+    }.asJava
+    val extendedResults = new ExtendedWorkspaceBuildTargetsResult(extendedTargets)
+    extendedResults
+  }
 }

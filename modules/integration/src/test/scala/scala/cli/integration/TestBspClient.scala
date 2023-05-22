@@ -10,6 +10,8 @@ import scala.collection.mutable
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.util.{Failure, Success}
 
+import scala.build.bsp as sb
+
 class TestBspClient extends b.BuildClient {
 
   private val lock      = new Object
@@ -95,13 +97,18 @@ class TestBspClient extends b.BuildClient {
 
 object TestBspClient {
 
-  private trait BuildServer extends b.BuildServer with b.ScalaBuildServer with b.JavaBuildServer
+  private trait BuildServer extends sb.ExtendedBuildServer with b.ScalaBuildServer
+      with b.JavaBuildServer with sb.CustomBspExtensions
 
   def connect(
     in: InputStream,
     out: OutputStream,
     es: ExecutorService
-  ): (TestBspClient, b.BuildServer & b.ScalaBuildServer & b.JavaBuildServer, Future[Unit]) = {
+  ): (
+    TestBspClient,
+    sb.ExtendedBuildServer & b.ScalaBuildServer & b.JavaBuildServer & sb.CustomBspExtensions,
+    Future[Unit]
+  ) = {
 
     val localClient = new TestBspClient
 
@@ -113,7 +120,6 @@ object TestBspClient {
       .setLocalService(localClient)
       .create()
     val remoteServer = launcher.getRemoteProxy
-    localClient.onConnectWithServer(remoteServer)
 
     val f  = launcher.startListening()
     val f0 = naiveJavaFutureToScalaFuture(f).map(_ => ())(ExecutionContext.fromExecutor(es))
